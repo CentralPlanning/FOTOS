@@ -1,7 +1,7 @@
 /***********************
  * CONFIGURAÇÕES
  ***********************/
-const API_BASE = "http://127.0.0.1:5000";
+const API_BASE = "https://fotos-lt35.onrender.com";
 const ENDPOINTS = {
   list: `${API_BASE}/list_files`,
   upload: `${API_BASE}/upload`,
@@ -125,7 +125,6 @@ inputFile.addEventListener("change", () => {
   validFiles.forEach((f) => dt.items.add(f));
   inputFile.files = dt.files;
 });
-
 
 /***********************
  * REDIMENSIONAR E CONVERTER PARA WEBP
@@ -257,7 +256,10 @@ async function loadGallery() {
       const li = document.createElement("li");
       li.className = "file-item";
       li.innerHTML = `
-        <span class="file-name">${f.name}</span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <img src="${f.url}" width="40" height="40" style="border-radius:6px;object-fit:cover;">
+          <span class="file-name">${f.name}</span>
+        </div>
         <button class="delete-btn" title="Excluir"><i class="fa fa-trash"></i></button>
       `;
       li.querySelector(".file-name").addEventListener("click", () =>
