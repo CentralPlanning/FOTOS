@@ -1,18 +1,18 @@
+import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import boto3
-import os
 from botocore.client import Config
 from werkzeug.utils import secure_filename
 
-# === CONFIGURAÇÕES ===
-ACCOUNT_ID = "67d13735373e6166a2e08654efeff417"
-ACCESS_KEY = "238818d8a4cff3385b9c12865fd2ee40"
-SECRET_KEY = "2119d826ab2b8d1c56b3d47e0efc87c51a4b253694be555cc48b86c0b96c6016"
-BUCKET = "fotos-centralplanning"
+ACCOUNT_ID = os.getenv("ACCOUNT_ID")
+ACCESS_KEY = os.getenv("ACCESS_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+BUCKET = os.getenv("BUCKET")
+PUBLIC_URL = os.getenv("PUBLIC_URL")
 FOLDER = "imagens/"
 ENDPOINT = f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com"
-PUBLIC_URL = "https://pub-7e13280167d248c1b764a7bb6e1ba721.r2.dev"
+
 
 # === INICIAR FLASK ===
 app = Flask(__name__)
