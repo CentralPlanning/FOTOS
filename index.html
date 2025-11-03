@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Upload Center</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+</head>
+<body>
+
+<!-- LOGO SUPERIOR DIREITO -->
+<a href="/" class="logo-top" title="Central Planning">
+  <img src="https://centralplanning.github.io/FOTOS_DATA/logo.png" alt="Central Planning Logo" />
+</a>
+
+<div class="main-container">
+  <!-- LADO ESQUERDO (UPLOAD) -->
+  <div class="upload-section">
+    <div class="upload">
+      <div class="upload-files">
+        <header>
+          <p><i class="fa fa-cloud-upload"></i> <span class="up">Up</span><span class="load">load</span></p>
+        </header>
+
+        <div class="body" id="drop">
+          <i class="fa fa-file-image pointer-none"></i>
+          <p class="pointer-none">
+            <b>Arraste e solte</b> imagens aqui <br />
+            ou <a href="#" id="triggerFile">navegue</a> para selecionar
+          </p>
+          <input type="file" multiple accept="image/*" />
+        </div>
+
+        <footer>
+          <div class="divider"><span>ARQUIVOS</span></div>
+          <div class="list-files"></div>
+          <button class="importar">ENVIAR</button>
+        </footer>
+      </div>
+    </div>
+  </div>
+
+  <!-- LADO DIREITO (GALERIA) -->
+  <div class="gallery-section">
+    <div class="gallery" id="gallery">
+      <h3>📁 Galeria de fotos</h3>
+      <input type="text" id="searchInput" placeholder="Buscar por nome..." />
+      <ul id="fileList"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL DE CARREGAMENTO -->
+<div id="loadingModal" class="loading-modal hidden">
+  <div class="modal-content">
+    <div class="avatar-container">
+      <img 
+        src="https://centralplanning.github.io/FOTOS_DATA/logo-dark.png"
+        alt="loading-avatar"
+        class="avatar-bounce"
+      >
+    </div>
+    <p id="loadingText">Carregando imagens...</p>
+    <div class="progress-bar-wrapper">
+      <div class="progress-bar-inner" id="progressInner"></div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL DE CONFIRMAÇÃO -->
+<div id="confirmModal" class="hidden modal-overlay">
+  <div class="modal-content fade-in">
+    <h3 id="confirmText">Deseja excluir este arquivo?</h3>
+    <div class="modal-buttons">
+      <button id="cancelDelete" class="cancel-btn">Cancelar</button>
+      <button id="confirmDelete" class="confirm-btn">Excluir</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/browser-image-compression@2.0.2/dist/browser-image-compression.min.js"></script>
+<script src="script.js"></script>
+
+</body>
+</html>
