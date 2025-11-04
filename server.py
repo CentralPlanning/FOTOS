@@ -28,24 +28,49 @@ s3 = boto3.client(
     region_name="auto"
 )
 
-# === LISTAR ARQUIVOS ===
+# === LISTAR ARQUIVOS PAGINADO (SUPORTA 62k+ ITENS) ===
 @app.route("/list_files", methods=["GET"])
 def list_files():
     try:
-        response = s3.list_objects_v2(Bucket=BUCKET, Prefix=FOLDER)
-        files = []
+        # token opcional vindo do frontend
+        token = request.args.get("token")
+        # quantidade de arquivos por página (máximo 1000 é o limite da API)
+        max_keys = int(request.args.get("max", 1000))
+
+        # parâmetros base da listagem
+        kwargs = {
+            "Bucket": BUCKET,
+            "Prefix": FOLDER,
+            "MaxKeys": max_keys
+        }
+        if token:
+            kwargs["ContinuationToken"] = token
+
+        response = s3.list_objects_v2(**kwargs)
+
+        items = []
         for obj in response.get("Contents", []):
             key = obj["Key"]
             if key.endswith("/"):
                 continue
-            files.append({
+            items.append({
                 "name": key.split("/")[-1],
                 "url": f"{PUBLIC_URL}/{key}"
             })
-        return jsonify(files)
+
+        # Se houver mais páginas, devolve o token
+        next_token = response.get("NextContinuationToken")
+
+        return jsonify({
+            "items": items,
+            "next_token": next_token,
+            "has_more": bool(next_token)
+        })
+
     except Exception as e:
         print("❌ Erro ao listar arquivos:", e)
         return jsonify({"error": str(e)}), 500
+
 
 
 # === UPLOAD DE ARQUIVO ===
