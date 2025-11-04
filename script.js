@@ -1,12 +1,22 @@
 /***********************
  * CONFIGURAÇÕES
  ***********************/
-const API_BASE = "https://fotos-lt35.onrender.com";
+const API_BASE = "https://fotos-lt35.onrender.com"; // troque se necessário
 const ENDPOINTS = {
   list: `${API_BASE}/list_files`,
   upload: `${API_BASE}/upload`,
   delete: `${API_BASE}/delete`,
 };
+
+// Tamanho do lote do scroll infinito
+const BATCH_SIZE = 500;
+
+// Conexões simultâneas de upload
+const UPLOAD_CONCURRENCY = 5;
+
+// Cache local (chave e validade em ms)
+const CACHE_KEY = "galleryIndex.v1";
+const CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
 /***********************
  * ELEMENTOS DE UI
@@ -30,6 +40,22 @@ const confirmDelete = document.getElementById("confirmDelete");
 let pendingDelete = null;
 
 /***********************
+ * ESTADO
+ ***********************/
+const state = {
+  // lista completa vinda do servidor (ou cache)
+  items: [], // [{name, url}]
+  // lista filtrada (busca)
+  filtered: [],
+  // quantos itens do filtered já estão renderizados
+  renderedCount: 0,
+  // se já estamos carregando/atualizando
+  loading: false,
+  // se estamos buscando (aplica debounce)
+  searchTerm: "",
+};
+
+/***********************
  * UI / MODAL
  ***********************/
 function showLoading(msg = "⏳ Processando...") {
@@ -38,7 +64,7 @@ function showLoading(msg = "⏳ Processando...") {
   progressInner.style.width = "0%";
 }
 function setProgress(pct) {
-  progressInner.style.width = `${pct}%`;
+  progressInner.style.width = `${Math.max(0, Math.min(100, pct))}%`;
 }
 function hideLoading(msg = "✅ Concluído!") {
   loadingText.textContent = msg;
@@ -70,6 +96,187 @@ function showToast(msg, type = "success") {
 }
 
 /***********************
+ * DEBOUNCE (busca)
+ ***********************/
+function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+/***********************
+ * CACHE LOCAL
+ ***********************/
+function readCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || !obj.items || !obj.storedAt) return null;
+    if (Date.now() - obj.storedAt > CACHE_TTL) return null;
+    return obj.items;
+  } catch {
+    return null;
+  }
+}
+function writeCache(items) {
+  try {
+    localStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ storedAt: Date.now(), items })
+    );
+  } catch (e) {
+    // se der quota excedida, ignoramos
+    console.warn("Cache write failed:", e);
+  }
+}
+
+/***********************
+ * RENDERIZAÇÃO (VIRTUAL + BATCH)
+ ***********************/
+function clearList() {
+  fileList.innerHTML = "";
+  state.renderedCount = 0;
+}
+function ensureFiltered() {
+  const q = state.searchTerm.trim().toLowerCase();
+  if (!q) {
+    state.filtered = state.items;
+    return;
+  }
+  state.filtered = state.items.filter((it) =>
+    it.name.toLowerCase().includes(q)
+  );
+}
+function renderNextBatch() {
+  // Renderiza mais BATCH_SIZE itens (ou até o fim)
+  const start = state.renderedCount;
+  const end = Math.min(start + BATCH_SIZE, state.filtered.length);
+  if (start >= end) return;
+
+  const fragment = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+    const f = state.filtered[i];
+    const li = document.createElement("li");
+    li.className = "file-item";
+    // Sem thumb de imagem para não pesar (você pediu apenas nome + lixeira)
+    li.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;">
+          <img src="${f.url}" width="40" height="40" style="border-radius:6px;object-fit:cover;">
+          <span class="file-name">${f.name}</span>
+        </div>
+      <button class="delete-btn" title="Excluir"><i class="fa fa-trash"></i></button>
+    `;
+    li.querySelector(".file-name").addEventListener("click", () =>
+      window.open(f.url, "_blank")
+    );
+    li.querySelector(".delete-btn").addEventListener("click", () => {
+      pendingDelete = { filename: f.name, element: li };
+      confirmText.textContent = `Deseja excluir "${f.name}"?`;
+      confirmModal.classList.remove("hidden");
+    });
+    fragment.appendChild(li);
+  }
+  fileList.appendChild(fragment);
+  state.renderedCount = end;
+}
+function resetAndRenderAll() {
+  clearList();
+  ensureFiltered();
+  renderNextBatch();
+}
+
+/***********************
+ * INFINITE SCROLL
+ ***********************/
+function isNearBottom(element, threshold = 120) {
+  return element.scrollTop + element.clientHeight >= element.scrollHeight - threshold;
+}
+fileList.addEventListener("scroll", () => {
+  if (isNearBottom(fileList)) {
+    renderNextBatch();
+  }
+});
+
+/***********************
+ * BUSCA (com debounce)
+ ***********************/
+const onSearch = debounce(() => {
+  state.searchTerm = searchInput.value || "";
+  resetAndRenderAll();
+}, 300);
+searchInput.addEventListener("input", onSearch);
+
+/***********************
+ * LISTAGEM (com atualização parcial)
+ * - Passo 1: carrega do cache imediatamente (se houver).
+ * - Passo 2: busca no servidor e faz "merge" apenas do que mudou.
+ ***********************/
+async function fetchServerList() {
+  const res = await fetch(ENDPOINTS.list);
+  if (!res.ok) throw new Error("Falha ao listar no servidor");
+  return res.json(); // [{name,url}]
+}
+function mergeLists(oldList, newList) {
+  // cria sets pelos nomes
+  const oldMap = new Map(oldList.map((x) => [x.name, x]));
+  const newMap = new Map(newList.map((x) => [x.name, x]));
+
+  // adiciona novos
+  const merged = [...oldList];
+  for (const [name, item] of newMap) {
+    if (!oldMap.has(name)) merged.push(item);
+  }
+  // remove que não existem mais
+  const result = merged.filter((x) => newMap.has(x.name));
+
+  // ordena por nome (padrão atual)
+  result.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return result;
+}
+
+async function loadGallery() {
+  // 1) tenta cache
+  const cached = readCache();
+  if (cached && cached.length) {
+    state.items = cached;
+    resetAndRenderAll();
+  } else {
+    // mostra algo mínimo
+    fileList.innerHTML = "<li style='padding:10px;color:#888'>Carregando...</li>";
+  }
+
+  // 2) atualiza com servidor (e re-renderiza apenas se mudou)
+  try {
+    state.loading = true;
+    showLoading("📂 Atualizando galeria...");
+    const serverItems = await fetchServerList();
+
+    if (!Array.isArray(serverItems)) throw new Error("Formato inválido");
+    // ordena e salva
+    serverItems.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true })
+    );
+
+    // Se não tinha cache ou mudou, mergeia e atualiza UI
+    if (!cached || JSON.stringify(cached.map((i) => i.name)) !== JSON.stringify(serverItems.map((i) => i.name))) {
+      state.items = cached ? mergeLists(cached, serverItems) : serverItems;
+      writeCache(state.items);
+      resetAndRenderAll();
+    }
+    hideLoading("✅ Galeria atualizada!");
+  } catch (err) {
+    console.error(err);
+    showToast("Erro ao carregar galeria", "error");
+    hideLoading("❌ Falha");
+  } finally {
+    state.loading = false;
+  }
+}
+
+/***********************
  * PREVIEW DOS ARQUIVOS (VALIDAÇÃO VISUAL + REGRA NUMÉRICA)
  ***********************/
 inputFile.addEventListener("change", () => {
@@ -87,6 +294,7 @@ inputFile.addEventListener("change", () => {
     div.className = "file";
     div.innerHTML = `
       <img src="https://cdn-icons-png.flaticon.com/512/337/337946.png" style="width:32px;height:32px;opacity:0.8;" />
+      
       <span class="file-name">${file.name}</span>
       <div class="progress"></div>
     `;
@@ -127,7 +335,7 @@ inputFile.addEventListener("change", () => {
 });
 
 /***********************
- * REDIMENSIONAR E CONVERTER PARA WEBP
+ * REDIMENSIONAR E CONVERTER PARA WEBP (lado maior = 300px)
  ***********************/
 async function processImage(file) {
   return new Promise((resolve, reject) => {
@@ -138,14 +346,23 @@ async function processImage(file) {
         const canvas = document.createElement("canvas");
         const ctx = canvas.getContext("2d");
 
-        const maxW = 300;
-        const scale = maxW / img.width;
-        const newW = Math.min(maxW, img.width);
-        const newH = img.height * scale;
+        const maxSide = 300;
+        let { width, height } = img;
+        if (width >= height) {
+          if (width !== maxSide) {
+            height = Math.round((height / width) * maxSide);
+            width = maxSide;
+          }
+        } else {
+          if (height !== maxSide) {
+            width = Math.round((width / height) * maxSide);
+            height = maxSide;
+          }
+        }
 
-        canvas.width = newW;
-        canvas.height = newH;
-        ctx.drawImage(img, 0, 0, newW, newH);
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
 
         canvas.toBlob(
           (blob) => {
@@ -170,116 +387,114 @@ async function processImage(file) {
 }
 
 /***********************
- * UPLOAD COM VALIDAÇÃO E CONTADOR
+ * HELPERS DE UPLOAD PARALELO
+ ***********************/
+async function uploadOne(webpFile) {
+  const formData = new FormData();
+  formData.append("file", webpFile);
+  const res = await fetch(ENDPOINTS.upload, { method: "POST", body: formData });
+  const result = await res.json();
+  if (!res.ok) throw new Error(result?.error || "Falha no upload");
+  return result;
+}
+async function runInBatches(items, worker, concurrency, onProgress) {
+  let inFlight = 0;
+  let idx = 0;
+  let done = 0;
+  return new Promise((resolve) => {
+    const results = [];
+    function next() {
+      if (done === items.length) return resolve(results);
+      while (inFlight < concurrency && idx < items.length) {
+        const currentIndex = idx++;
+        inFlight++;
+        worker(items[currentIndex])
+          .then((r) => (results[currentIndex] = { ok: true, value: r }))
+          .catch((e) => (results[currentIndex] = { ok: false, error: e }))
+          .finally(() => {
+            inFlight--;
+            done++;
+            onProgress?.(done, items.length);
+            next();
+          });
+      }
+    }
+    next();
+  });
+}
+
+/***********************
+ * UPLOAD (paralelo + progress)
  ***********************/
 btnUpload.addEventListener("click", async () => {
   if (!inputFile.files.length)
     return showToast("Nenhum arquivo selecionado", "warning");
 
+  // coleta só válidos (já filtrado no change, mas garantimos)
   const allFiles = Array.from(inputFile.files);
-  const validFiles = [];
-  const invalidFiles = [];
-
-  for (const file of allFiles) {
-    const nameWithoutExt = file.name.split(".")[0];
-    if (/^\d+$/.test(nameWithoutExt)) validFiles.push(file);
-    else invalidFiles.push(file.name);
-  }
-
-  if (invalidFiles.length > 0) {
-    showToast(
-      `⚠️ ${invalidFiles.length} arquivo(s) ignorado(s): ${invalidFiles.join(", ")}`,
-      "warning"
-    );
-  }
-
+  const validFiles = allFiles.filter((f) => /^\d+$/.test(f.name.split(".")[0]));
   if (!validFiles.length) {
     showToast("Nenhum arquivo válido para enviar.", "error");
     return;
   }
 
-  showLoading(`⬆️ Enviando ${validFiles.length} arquivo(s)...`);
-  let sent = 0;
-  let failed = 0;
+  showLoading(`⬆️ Preparando ${validFiles.length} arquivo(s)...`);
+  setProgress(5);
+  btnUpload.disabled = true;
 
-  for (const [i, file] of validFiles.entries()) {
-    try {
-      loadingText.textContent = `📤 Enviando ${i + 1} de ${validFiles.length}...`;
-      setProgress(((i + 1) / validFiles.length) * 80);
-
-      const webpFile = await processImage(file);
-      const formData = new FormData();
-      formData.append("file", webpFile);
-
-      const res = await fetch(ENDPOINTS.upload, { method: "POST", body: formData });
-      const result = await res.json();
-
-      if (res.ok) {
-        sent++;
-      } else {
-        failed++;
-        console.warn("Erro upload:", result);
-      }
-    } catch (err) {
-      console.error(err);
-      failed++;
-    }
+  // 1) Converte todos para webp (em sequência para não explodir memória)
+  const webps = [];
+  for (let i = 0; i < validFiles.length; i++) {
+    loadingText.textContent = `🧪 Convertendo ${i + 1} / ${validFiles.length}`;
+    const w = await processImage(validFiles[i]);
+    webps.push(w);
+    setProgress(5 + (i / validFiles.length) * 20); // até 25%
   }
 
-  hideLoading(`✅ Envio finalizado!`);
-  const summary = `✅ ${sent} enviado(s) | ⚠️ ${invalidFiles.length} ignorado(s) | ❌ ${failed} com erro`;
+  // 2) Envia em paralelo (batches)
+  let lastPct = 25;
+  const results = await runInBatches(
+    webps,
+    uploadOne,
+    UPLOAD_CONCURRENCY,
+    (done, total) => {
+      const pct = 25 + Math.floor((done / total) * 60); // 25% → 85%
+      if (pct > lastPct) {
+        lastPct = pct;
+        setProgress(pct);
+        loadingText.textContent = `📤 Enviando ${done} / ${total}...`;
+      }
+    }
+  );
+
+  // 3) Resumo
+  const sent = results.filter((r) => r?.ok).length;
+  const failed = results.filter((r) => !r?.ok).length;
+
+  // 4) Atualiza lista de forma parcial (busca de novo e merge)
+  loadingText.textContent = "🔄 Atualizando galeria...";
+  setProgress(92);
+  try {
+    const fresh = await fetchServerList();
+    fresh.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true })
+    );
+    state.items = mergeLists(state.items, fresh);
+    writeCache(state.items);
+    resetAndRenderAll();
+  } catch (e) {
+    console.warn("Falha ao atualizar após upload", e);
+  }
+
+  hideLoading("✅ Envio finalizado!");
+  const summary = `✅ ${sent} enviado(s) | ❌ ${failed} com erro`;
   showToast(summary, failed ? "warning" : "success");
 
-  await loadGallery();
-  inputFile.value = "";
+  btnUpload.disabled = false;
   btnUpload.classList.remove("active");
   listFiles.innerHTML = "";
+  inputFile.value = "";
 });
-
-/***********************
- * GALERIA
- ***********************/
-async function loadGallery() {
-  try {
-    showLoading("📂 Carregando galeria...");
-    const res = await fetch(ENDPOINTS.list);
-    const items = await res.json();
-    fileList.innerHTML = "";
-
-    if (!items.length) {
-      fileList.innerHTML =
-        "<li style='padding:10px;color:#888'>Nenhum arquivo encontrado.</li>";
-      return hideLoading("🟡 Galeria vazia");
-    }
-
-    for (const f of items) {
-      const li = document.createElement("li");
-      li.className = "file-item";
-      li.innerHTML = `
-        <div style="display:flex;align-items:center;gap:10px;">
-          <img src="${f.url}" width="40" height="40" style="border-radius:6px;object-fit:cover;">
-          <span class="file-name">${f.name}</span>
-        </div>
-        <button class="delete-btn" title="Excluir"><i class="fa fa-trash"></i></button>
-      `;
-      li.querySelector(".file-name").addEventListener("click", () =>
-        window.open(f.url, "_blank")
-      );
-      li.querySelector(".delete-btn").addEventListener("click", () => {
-        pendingDelete = { filename: f.name, element: li };
-        confirmText.textContent = `Deseja excluir "${f.name}"?`;
-        confirmModal.classList.remove("hidden");
-      });
-      fileList.appendChild(li);
-    }
-
-    hideLoading("✅ Galeria atualizada!");
-  } catch (err) {
-    console.error(err);
-    showToast("Erro ao carregar galeria", "error");
-    hideLoading("❌ Falha");
-  }
-}
 
 /***********************
  * EXCLUSÃO CONFIRMADA
@@ -297,7 +512,11 @@ confirmDelete.addEventListener("click", async () => {
     });
     const result = await res.json();
     if (res.ok) {
-      pendingDelete.element.remove();
+      // Remove do estado e cache
+      state.items = state.items.filter((x) => x.name !== pendingDelete.filename);
+      writeCache(state.items);
+      // Re-render filtrado
+      resetAndRenderAll();
       showToast(result.message);
     } else showToast(result.error || "Erro ao excluir", "error");
   } catch (err) {
@@ -314,20 +533,9 @@ cancelDelete.addEventListener("click", () => {
 });
 
 /***********************
- * BUSCA LOCAL
- ***********************/
-searchInput.addEventListener("input", () => {
-  const q = searchInput.value.toLowerCase();
-  document.querySelectorAll(".file-item").forEach((li) => {
-    li.style.display = li.textContent.toLowerCase().includes(q)
-      ? "flex"
-      : "none";
-  });
-});
-
-/***********************
  * DRAG & DROP
  ***********************/
+triggerFile?.addEventListener("click", (e) => (e.preventDefault(), inputFile.click()));
 dropArea.addEventListener("dragover", (e) => {
   e.preventDefault();
   dropArea.classList.add("active");
