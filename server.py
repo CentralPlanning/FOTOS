@@ -1,10 +1,11 @@
 import os
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory, abort
 from flask_cors import CORS
 import boto3
 from botocore.client import Config
 from werkzeug.utils import secure_filename
 
+# === VARIÁVEIS DE AMBIENTE ===
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")
 ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -13,12 +14,19 @@ PUBLIC_URL = os.getenv("PUBLIC_URL")
 FOLDER = "imagens/"
 ENDPOINT = f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-
 # === INICIAR FLASK ===
 app = Flask(__name__)
 CORS(app)
 
-# === CONEXÃO COM R2 ===
+# === 🔒 RESTRIÇÃO DE IP CORPORATIVO ===
+@app.before_request
+def restrict_ip():
+    client_ip = request.remote_addr or ''
+    if not client_ip.startswith("10.167."):
+        print(f"🚫 Acesso negado para IP: {client_ip}")
+        abort(403)  # Acesso proibido
+
+# === CONEXÃO COM CLOUDFLARE R2 ===
 s3 = boto3.client(
     "s3",
     endpoint_url=ENDPOINT,
@@ -28,16 +36,20 @@ s3 = boto3.client(
     region_name="auto"
 )
 
-# === LISTAR ARQUIVOS PAGINADO (SUPORTA 62k+ ITENS) ===
+# === ROTA PRINCIPAL (Serve o index.html) ===
+@app.route("/")
+def serve_index():
+    """Serve o index.html do frontend (na raiz do projeto)."""
+    return send_from_directory(".", "index.html")
+
+
+# === LISTAR ARQUIVOS PAGINADO ===
 @app.route("/list_files", methods=["GET"])
 def list_files():
     try:
-        # token opcional vindo do frontend
-        token = request.args.get("token")
-        # quantidade de arquivos por página (máximo 1000 é o limite da API)
-        max_keys = int(request.args.get("max", 1000))
+        token = request.args.get("token")  # token opcional
+        max_keys = int(request.args.get("max", 1000))  # máximo por página
 
-        # parâmetros base da listagem
         kwargs = {
             "Bucket": BUCKET,
             "Prefix": FOLDER,
@@ -58,7 +70,6 @@ def list_files():
                 "url": f"{PUBLIC_URL}/{key}"
             })
 
-        # Se houver mais páginas, devolve o token
         next_token = response.get("NextContinuationToken")
 
         return jsonify({
@@ -66,14 +77,12 @@ def list_files():
             "next_token": next_token,
             "has_more": bool(next_token)
         })
-
     except Exception as e:
         print("❌ Erro ao listar arquivos:", e)
         return jsonify({"error": str(e)}), 500
 
 
-
-# === UPLOAD DE ARQUIVO ===
+# === UPLOAD DE ARQUIVOS ===
 @app.route("/upload", methods=["POST"])
 def upload_file():
     try:
@@ -85,7 +94,6 @@ def upload_file():
         destino = f"{FOLDER}{filename}"
 
         s3.upload_fileobj(file, BUCKET, destino, ExtraArgs={"ContentType": file.content_type})
-
         url = f"{PUBLIC_URL}/{destino}"
         print(f"✅ Upload concluído: {url}")
 
@@ -115,7 +123,7 @@ def delete_file():
         return jsonify({"error": str(e)}), 500
 
 
+# === INICIAR SERVIDOR ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-

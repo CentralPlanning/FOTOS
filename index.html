@@ -54,6 +54,29 @@
       <h3>📁 Galeria de fotos</h3>
       <input type="text" id="searchInput" placeholder="Buscar por nome..." />
       <ul id="fileList"></ul>
+      <!-- Botão de download XLSX -->
+        <div id="gallery-download" class="download-wrap">
+          <button id="btnXlsx" class="dl2" type="button" aria-live="polite">
+            <!-- Ícones: seta (default) e check (feito) -->
+            <span class="dl2__icon">
+              <svg class="i i-download" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3a1 1 0 0 1 1 1v10.17l3.59-3.58a1 1 0 1 1 1.41 1.42l-5.3 5.3a1 1 0 0 1-1.41 0l-5.3-5.3a1 1 0 1 1 1.41-1.42L11 14.17V4a1 1 0 0 1 1-1Z"/>
+                <path d="M4 19a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Z"/>
+              </svg>
+              <svg class="i i-check" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20.29 7.29a1 1 0 0 1 0 1.42l-9 9a1 1 0 0 1-1.42 0l-4-4a1 1 0 0 1 1.42-1.42L10 15.17l8.58-8.58a1 1 0 0 1 1.41 0Z"/>
+              </svg>
+            </span>
+
+            <span class="dl2__text" id="dl2Label">Baixar XLSX</span>
+
+            <!-- Barra de progresso -->
+            <span class="dl2__bar" aria-hidden="true">
+              <span id="dl2Bar"></span>
+            </span>
+          </button>
+        </div>
+
     </div>
   </div>
 </div>
@@ -88,6 +111,153 @@
 
 <script src="https://cdn.jsdelivr.net/npm/browser-image-compression@2.0.2/dist/browser-image-compression.min.js"></script>
 <script src="script.js"></script>
+<div class="bottom-progress" id="bottomProgress" style="
+  position:fixed;
+  bottom:18px;
+  right:22px;
+  color:#fff;
+  font-size:14px;
+  font-family:Inter, sans-serif;
+  background:rgba(0,0,0,0.7);
+  padding:8px 14px;
+  border-radius:8px;
+  backdrop-filter:blur(4px);
+  z-index:9999;
+  transition:opacity .3s ease;
+  opacity:0;">
+📸 0 / 0 — Aguardando imagens...
+</div>
+
+<script type="module">
+/**
+ * Exportar galeria em XLSX
+ * Compatível com window.state.items carregado pelo script principal
+ * Requer: https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm
+ */
+
+const btn   = document.getElementById('btnXlsx');
+const bar   = document.getElementById('dl2Bar');
+const label = document.getElementById('dl2Label');
+
+let running = false;
+
+/* === Utilidades === */
+function setProgress(p){ 
+  const pct = Math.max(0, Math.min(1, p));
+  bar.style.width = (pct * 100).toFixed(2) + '%';
+}
+function nextFrame(){ 
+  return new Promise(r => requestAnimationFrame(() => r())); 
+}
+
+/* === Estados do botão === */
+function setBusy(text='Gerando arquivo...'){
+  running = true;
+  btn.classList.add('is-busy');
+  label.textContent = text;
+  setProgress(0);
+}
+function setDone(text='Feito'){
+  btn.classList.remove('is-busy');
+  btn.classList.add('is-done');
+  setProgress(1);
+  label.textContent = text;
+  setTimeout(() => {
+    btn.classList.remove('is-done');
+    label.textContent = 'Baixar XLSX';
+    setProgress(0);
+    running = false;
+  }, 2500);
+}
+function setIdle(){
+  btn.classList.remove('is-busy','is-done');
+  label.textContent = 'Baixar XLSX';
+  setProgress(0);
+  running = false;
+}
+
+/* === Evento principal === */
+btn.addEventListener('click', async (e) => {
+  e.preventDefault();
+  if (running) return;
+
+  // ✅ Captura global do state
+  const globalState = window.state || {};
+  const items = Array.isArray(globalState.items) ? globalState.items : [];
+  if (!items.length){
+    alert('Nenhuma imagem carregada para exportar.');
+    return;
+  }
+
+  try{
+    setBusy('Preparando dados...');
+    await nextFrame();
+
+    // === Monta dados ===
+    const rows = [["Nome do Arquivo", "URL da Imagem"]];
+    const total = items.length;
+    const step = Math.max(500, Math.ceil(total / 40)); // ~40 atualizações de progresso
+
+    for (let i = 0; i < total; i += step){
+      const slice = items.slice(i, i + step);
+      for (const obj of slice){
+        const name = String(obj.name || '').replace(/\.webp$/i,'');
+        rows.push([name, obj.url || '']);
+      }
+      setProgress(Math.min(0.8, (i + slice.length) / total * 0.8));
+      await nextFrame();
+    }
+
+    // === Cria workbook ===
+    label.textContent = 'Criando XLSX...';
+    setProgress(0.85);
+    const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
+    await nextFrame();
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, 'Galeria');
+
+    label.textContent = 'Finalizando...';
+    setProgress(0.95);
+    await nextFrame();
+
+    // === Gera e baixa ===
+    const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([ab], { type: 
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+    });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const date = new Date().toISOString().slice(0,10);
+    a.href = url;
+    a.download = `galeria_fotos_${date}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    setProgress(1);
+    setDone('Feito');
+  }catch(err){
+    console.error(err);
+    alert('Falha ao gerar o XLSX.');
+    setIdle();
+  }
+});
+
+/* === Garante acesso global === */
+window.addEventListener('DOMContentLoaded', () => {
+  if (window.state) {
+    console.log('✅ Exportador XLSX conectado à galeria:', window.state.items?.length || 0, 'itens');
+  } else {
+    window.state = { items: [] };
+    console.warn('⚠️ state global não encontrado. Foi inicializado vazio.');
+  }
+});
+</script>
+
 
 </body>
 </html>

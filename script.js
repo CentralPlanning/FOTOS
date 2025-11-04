@@ -1,22 +1,20 @@
 /***********************
  * CONFIGURAÇÕES
  ***********************/
-const API_BASE = "https://fotos-lt35.onrender.com"; // troque se necessário
+const API_BASE = "https://fotos-lt35.onrender.com";
 const ENDPOINTS = {
   list: `${API_BASE}/list_files`,
   upload: `${API_BASE}/upload`,
   delete: `${API_BASE}/delete`,
 };
 
-// Tamanho do lote do scroll infinito
+// Renderização em lotes (UI)
 const BATCH_SIZE = 500;
-
-// Conexões simultâneas de upload
+// Upload paralelo
 const UPLOAD_CONCURRENCY = 5;
-
-// Cache local (chave e validade em ms)
-const CACHE_KEY = "galleryIndex.v1";
-const CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
+// Cache local
+const CACHE_KEY = "galleryIndex.v5";
+const CACHE_TTL = 24 * 60 * 60 * 1000;
 
 /***********************
  * ELEMENTOS DE UI
@@ -43,34 +41,15 @@ let pendingDelete = null;
  * ESTADO
  ***********************/
 const state = {
-  // lista completa vinda do servidor (ou cache)
-  items: [], // [{name, url}]
-  // lista filtrada (busca)
+  items: [],
   filtered: [],
-  // quantos itens do filtered já estão renderizados
   renderedCount: 0,
-  // se já estamos carregando/atualizando
   loading: false,
-  // se estamos buscando (aplica debounce)
   searchTerm: "",
+  paused: false,
+  totalLoaded: 0,
+  totalExpected: 0
 };
-
-/***********************
- * UI / MODAL
- ***********************/
-function showLoading(msg = "⏳ Processando...") {
-  loadingModal.classList.remove("hidden");
-  loadingText.textContent = msg;
-  progressInner.style.width = "0%";
-}
-function setProgress(pct) {
-  progressInner.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-}
-function hideLoading(msg = "✅ Concluído!") {
-  loadingText.textContent = msg;
-  setProgress(100);
-  setTimeout(() => loadingModal.classList.add("hidden"), 900);
-}
 
 /***********************
  * TOASTS
@@ -93,6 +72,26 @@ function showToast(msg, type = "success") {
     toast.style.transform = "translateX(50%)";
     setTimeout(() => toast.remove(), 500);
   }, 3500);
+}
+
+/***********************
+ * MODAL (SOMENTE UPLOAD/EXCLUSÃO)
+ ***********************/
+function showLoading(msg = "⏳ Processando...") {
+  if (!loadingModal) return;
+  loadingModal.classList.remove("hidden");
+  loadingText.textContent = msg;
+  progressInner.style.width = "0%";
+}
+function setProgress(pct) {
+  if (!progressInner) return;
+  progressInner.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+}
+function hideLoading(msg = "✅ Concluído!") {
+  if (!loadingModal) return;
+  loadingText.textContent = msg;
+  setProgress(100);
+  setTimeout(() => loadingModal.classList.add("hidden"), 900);
 }
 
 /***********************
@@ -128,7 +127,6 @@ function writeCache(items) {
       JSON.stringify({ storedAt: Date.now(), items })
     );
   } catch (e) {
-    // se der quota excedida, ignoramos
     console.warn("Cache write failed:", e);
   }
 }
@@ -142,16 +140,11 @@ function clearList() {
 }
 function ensureFiltered() {
   const q = state.searchTerm.trim().toLowerCase();
-  if (!q) {
-    state.filtered = state.items;
-    return;
-  }
-  state.filtered = state.items.filter((it) =>
-    it.name.toLowerCase().includes(q)
-  );
+  state.filtered = q
+    ? state.items.filter((it) => it.name.toLowerCase().includes(q))
+    : state.items;
 }
 function renderNextBatch() {
-  // Renderiza mais BATCH_SIZE itens (ou até o fim)
   const start = state.renderedCount;
   const end = Math.min(start + BATCH_SIZE, state.filtered.length);
   if (start >= end) return;
@@ -161,12 +154,11 @@ function renderNextBatch() {
     const f = state.filtered[i];
     const li = document.createElement("li");
     li.className = "file-item";
-    // Sem thumb de imagem para não pesar (você pediu apenas nome + lixeira)
     li.innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;">
-          <img src="${f.url}" width="40" height="40" style="border-radius:6px;object-fit:cover;">
-          <span class="file-name">${f.name}</span>
-        </div>
+        <img src="${f.url}" width="40" height="40" style="border-radius:6px;object-fit:cover;">
+        <span class="file-name">${f.name}</span>
+      </div>
       <button class="delete-btn" title="Excluir"><i class="fa fa-trash"></i></button>
     `;
     li.querySelector(".file-name").addEventListener("click", () =>
@@ -191,11 +183,8 @@ function resetAndRenderAll() {
 /***********************
  * INFINITE SCROLL
  ***********************/
-function isNearBottom(element, threshold = 120) {
-  return element.scrollTop + element.clientHeight >= element.scrollHeight - threshold;
-}
 fileList.addEventListener("scroll", () => {
-  if (isNearBottom(fileList)) {
+  if (fileList.scrollTop + fileList.clientHeight >= fileList.scrollHeight - 120) {
     renderNextBatch();
   }
 });
@@ -203,81 +192,116 @@ fileList.addEventListener("scroll", () => {
 /***********************
  * BUSCA (com debounce)
  ***********************/
-const onSearch = debounce(() => {
-  state.searchTerm = searchInput.value || "";
-  resetAndRenderAll();
-}, 300);
-searchInput.addEventListener("input", onSearch);
+searchInput.addEventListener(
+  "input",
+  debounce(() => {
+    state.searchTerm = searchInput.value || "";
+    resetAndRenderAll();
+  }, 300)
+);
 
 /***********************
- * LISTAGEM (com atualização parcial)
- * - Passo 1: carrega do cache imediatamente (se houver).
- * - Passo 2: busca no servidor e faz "merge" apenas do que mudou.
+ * PAINEL INFERIOR (carregamento de galeria)
  ***********************/
-async function fetchServerList() {
-  const res = await fetch(ENDPOINTS.list);
-  if (!res.ok) throw new Error("Falha ao listar no servidor");
-  return res.json(); // [{name,url}]
-}
-function mergeLists(oldList, newList) {
-  // cria sets pelos nomes
-  const oldMap = new Map(oldList.map((x) => [x.name, x]));
-  const newMap = new Map(newList.map((x) => [x.name, x]));
+const progressGlobal = document.createElement("div");
+progressGlobal.style = `
+  position: fixed; bottom: 14px; right: 14px; z-index: 99999;
+  background: rgba(0,0,0,.65); color: #fff; padding: 8px 12px;
+  border-radius: 8px; font: 13px/1.2 Inter,system-ui,Segoe UI,Arial;
+  display: none; cursor: pointer; backdrop-filter: blur(4px);
+`;
+document.body.appendChild(progressGlobal);
 
-  // adiciona novos
-  const merged = [...oldList];
-  for (const [name, item] of newMap) {
-    if (!oldMap.has(name)) merged.push(item);
+progressGlobal.addEventListener("click", () => {
+  state.paused = !state.paused;
+  progressGlobal.textContent = state.paused
+    ? `⏸️ Pausado (${state.totalLoaded.toLocaleString("pt-BR")} / ${state.totalExpected.toLocaleString("pt-BR")}) — Clique para retomar`
+    : `▶️ Retomando...`;
+});
+
+/***********************
+ * LISTAGEM PAGINADA (sem modal)
+ ***********************/
+async function fetchAllPagesAndRender() {
+  let allItems = [];
+  let token = null;
+  let page = 1;
+
+  state.paused = false;
+  state.totalLoaded = 0;
+  state.totalExpected = 0;
+  progressGlobal.style.display = "block";
+  progressGlobal.textContent = "📸 Iniciando carregamento... — Clique para pausar";
+
+  while (true) {
+    if (state.paused) {
+      progressGlobal.textContent = `⏸️ Pausado (${state.totalLoaded.toLocaleString("pt-BR")} / ${state.totalExpected.toLocaleString("pt-BR")}) — Clique para retomar`;
+      await new Promise((r) => {
+        const iv = setInterval(() => {
+          if (!state.paused) { clearInterval(iv); r(); }
+        }, 300);
+      });
+    }
+
+    const url = token ? `${ENDPOINTS.list}?token=${encodeURIComponent(token)}&max=1000` : `${ENDPOINTS.list}?max=1000`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Falha ao buscar página ${page}`);
+    const data = await res.json();
+
+    const items = Array.isArray(data) ? data : (data.items || []);
+    allItems.push(...items);
+
+    state.totalLoaded = allItems.length;
+    state.totalExpected = data.has_more ? page * 1000 : allItems.length;
+
+    progressGlobal.textContent =
+      `📸 ${state.totalLoaded.toLocaleString("pt-BR")} / ${state.totalExpected.toLocaleString("pt-BR")} — Clique para pausar`;
+
+    // Atualiza UI incrementalmente
+    state.items = allItems.slice();
+    resetAndRenderAll();
+
+    if (!data.has_more || !data.next_token) break;
+    token = data.next_token;
+    page++;
   }
-  // remove que não existem mais
-  const result = merged.filter((x) => newMap.has(x.name));
 
-  // ordena por nome (padrão atual)
-  result.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  return result;
+  progressGlobal.textContent = `✅ ${allItems.length.toLocaleString("pt-BR")} imagens carregadas`;
+  setTimeout(() => (progressGlobal.style.display = "none"), 5000);
+
+  // Ordena e persiste no cache
+  allItems.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  writeCache(allItems);
 }
 
+/***********************
+ * CARREGAMENTO INICIAL
+ ***********************/
 async function loadGallery() {
   // 1) tenta cache
   const cached = readCache();
-  if (cached && cached.length) {
+  if (cached?.length) {
     state.items = cached;
     resetAndRenderAll();
   } else {
-    // mostra algo mínimo
     fileList.innerHTML = "<li style='padding:10px;color:#888'>Carregando...</li>";
   }
 
-  // 2) atualiza com servidor (e re-renderiza apenas se mudou)
+  // 2) busca paginado sem modal
   try {
     state.loading = true;
-    showLoading("📂 Atualizando galeria...");
-    const serverItems = await fetchServerList();
-
-    if (!Array.isArray(serverItems)) throw new Error("Formato inválido");
-    // ordena e salva
-    serverItems.sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { numeric: true })
-    );
-
-    // Se não tinha cache ou mudou, mergeia e atualiza UI
-    if (!cached || JSON.stringify(cached.map((i) => i.name)) !== JSON.stringify(serverItems.map((i) => i.name))) {
-      state.items = cached ? mergeLists(cached, serverItems) : serverItems;
-      writeCache(state.items);
-      resetAndRenderAll();
-    }
-    hideLoading("✅ Galeria atualizada!");
+    await fetchAllPagesAndRender();
   } catch (err) {
     console.error(err);
     showToast("Erro ao carregar galeria", "error");
-    hideLoading("❌ Falha");
   } finally {
     state.loading = false;
   }
 }
+window.state = state;
 
 /***********************
- * PREVIEW DOS ARQUIVOS (VALIDAÇÃO VISUAL + REGRA NUMÉRICA)
+ * PREVIEW + VALIDAÇÃO (apenas nomes numéricos)
  ***********************/
 inputFile.addEventListener("change", () => {
   listFiles.innerHTML = "";
@@ -287,37 +311,47 @@ inputFile.addEventListener("change", () => {
   const invalidFiles = [];
 
   Array.from(inputFile.files).forEach((file) => {
-    const nameWithoutExt = file.name.split(".")[0];
-    const isValid = /^\d+$/.test(nameWithoutExt);
+    const base = file.name.split(".")[0];
+    const isValid = /^\d+$/.test(base);
 
-    const div = document.createElement("div");
-    div.className = "file";
-    div.innerHTML = `
-      <img src="https://cdn-icons-png.flaticon.com/512/337/337946.png" style="width:32px;height:32px;opacity:0.8;" />
-      
-      <span class="file-name">${file.name}</span>
-      <div class="progress"></div>
-    `;
-    listFiles.appendChild(div);
+   // Define ícones por extensão
+  const ext = file.name.split('.').pop().toLowerCase();
+  const iconMap = {
+    jpg:  "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+    jpeg: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+    png:  "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+    webp: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+    gif:  "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+    default: "https://cdn-icons-png.flaticon.com/512/833/833524.png"
+  };
+  const iconUrl = iconMap[ext] || iconMap.default;
+
+  // Cria o item visual
+  const row = document.createElement("div");
+  row.className = "file";
+  row.innerHTML = `
+    <img src="${iconUrl}" 
+        style="width:32px;height:32px;opacity:.9;border-radius:6px;" />
+    <span class="file-name">${file.name}</span>
+    <div class="progress"></div>
+  `;
+  listFiles.appendChild(row);
 
     if (!isValid) {
       invalidFiles.push(file.name);
-      div.classList.add("invalid-file");
+      row.classList.add("invalid-file");
       setTimeout(() => {
-        div.style.transition = "opacity 0.5s ease";
-        div.style.opacity = "0";
-        setTimeout(() => div.remove(), 400);
+        row.style.transition = "opacity .5s ease";
+        row.style.opacity = "0";
+        setTimeout(() => row.remove(), 400);
       }, 800);
     } else {
       validFiles.push(file);
     }
   });
 
-  if (invalidFiles.length > 0) {
-    showToast(
-      `⚠️ ${invalidFiles.length} arquivo(s) ignorado(s): ${invalidFiles.join(", ")}`,
-      "warning"
-    );
+  if (invalidFiles.length) {
+    showToast(`⚠️ ${invalidFiles.length} ignorado(s): ${invalidFiles.join(", ")}`, "warning");
   }
 
   if (!validFiles.length) {
@@ -328,14 +362,14 @@ inputFile.addEventListener("change", () => {
 
   btnUpload.classList.add("active");
 
-  // substitui o input apenas pelos válidos
+  // substitui o input pelos válidos
   const dt = new DataTransfer();
   validFiles.forEach((f) => dt.items.add(f));
   inputFile.files = dt.files;
 });
 
 /***********************
- * REDIMENSIONAR E CONVERTER PARA WEBP (lado maior = 300px)
+ * CONVERSÃO P/ WEBP (300px lado maior)
  ***********************/
 async function processImage(file) {
   return new Promise((resolve, reject) => {
@@ -343,37 +377,26 @@ async function processImage(file) {
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-
         const maxSide = 300;
         let { width, height } = img;
         if (width >= height) {
-          if (width !== maxSide) {
-            height = Math.round((height / width) * maxSide);
-            width = maxSide;
-          }
+          height = Math.round((height / width) * maxSide);
+          width = maxSide;
         } else {
-          if (height !== maxSide) {
-            width = Math.round((width / height) * maxSide);
-            height = maxSide;
-          }
+          width = Math.round((width / height) * maxSide);
+          height = maxSide;
         }
-
+        const canvas = document.createElement("canvas");
         canvas.width = width;
         canvas.height = height;
+        const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
-
         canvas.toBlob(
           (blob) => {
-            if (!blob) reject("Erro na conversão");
-            else {
-              const baseName = file.name.split(".")[0];
-              const webpFile = new File([blob], `${baseName}.webp`, {
-                type: "image/webp",
-              });
-              resolve(webpFile);
-            }
+            if (!blob) return reject("Erro na conversão");
+            const baseName = file.name.split(".")[0];
+            const webp = new File([blob], `${baseName}.webp`, { type: "image/webp" });
+            resolve(webp);
           },
           "image/webp",
           0.85
@@ -387,7 +410,7 @@ async function processImage(file) {
 }
 
 /***********************
- * HELPERS DE UPLOAD PARALELO
+ * UPLOAD (paralelo + barra global do modal)
  ***********************/
 async function uploadOne(webpFile) {
   const formData = new FormData();
@@ -398,22 +421,19 @@ async function uploadOne(webpFile) {
   return result;
 }
 async function runInBatches(items, worker, concurrency, onProgress) {
-  let inFlight = 0;
-  let idx = 0;
-  let done = 0;
+  let inFlight = 0, idx = 0, done = 0;
   return new Promise((resolve) => {
     const results = [];
     function next() {
       if (done === items.length) return resolve(results);
       while (inFlight < concurrency && idx < items.length) {
-        const currentIndex = idx++;
+        const i = idx++;
         inFlight++;
-        worker(items[currentIndex])
-          .then((r) => (results[currentIndex] = { ok: true, value: r }))
-          .catch((e) => (results[currentIndex] = { ok: false, error: e }))
+        worker(items[i])
+          .then((r) => (results[i] = { ok: true, value: r }))
+          .catch((e) => (results[i] = { ok: false, error: e }))
           .finally(() => {
-            inFlight--;
-            done++;
+            inFlight--; done++;
             onProgress?.(done, items.length);
             next();
           });
@@ -423,14 +443,9 @@ async function runInBatches(items, worker, concurrency, onProgress) {
   });
 }
 
-/***********************
- * UPLOAD (paralelo + progress)
- ***********************/
 btnUpload.addEventListener("click", async () => {
-  if (!inputFile.files.length)
-    return showToast("Nenhum arquivo selecionado", "warning");
+  if (!inputFile.files.length) return showToast("Nenhum arquivo selecionado", "warning");
 
-  // coleta só válidos (já filtrado no change, mas garantimos)
   const allFiles = Array.from(inputFile.files);
   const validFiles = allFiles.filter((f) => /^\d+$/.test(f.name.split(".")[0]));
   if (!validFiles.length) {
@@ -442,23 +457,23 @@ btnUpload.addEventListener("click", async () => {
   setProgress(5);
   btnUpload.disabled = true;
 
-  // 1) Converte todos para webp (em sequência para não explodir memória)
+  // 1) Converter
   const webps = [];
   for (let i = 0; i < validFiles.length; i++) {
     loadingText.textContent = `🧪 Convertendo ${i + 1} / ${validFiles.length}`;
     const w = await processImage(validFiles[i]);
     webps.push(w);
-    setProgress(5 + (i / validFiles.length) * 20); // até 25%
+    setProgress(5 + (i / validFiles.length) * 20);
   }
 
-  // 2) Envia em paralelo (batches)
+  // 2) Upload paralelo
   let lastPct = 25;
   const results = await runInBatches(
     webps,
     uploadOne,
     UPLOAD_CONCURRENCY,
     (done, total) => {
-      const pct = 25 + Math.floor((done / total) * 60); // 25% → 85%
+      const pct = 25 + Math.floor((done / total) * 60);
       if (pct > lastPct) {
         lastPct = pct;
         setProgress(pct);
@@ -467,28 +482,20 @@ btnUpload.addEventListener("click", async () => {
     }
   );
 
-  // 3) Resumo
+  // 3) Atualizar galeria (paginação real, sem modal)
   const sent = results.filter((r) => r?.ok).length;
   const failed = results.filter((r) => !r?.ok).length;
 
-  // 4) Atualiza lista de forma parcial (busca de novo e merge)
   loadingText.textContent = "🔄 Atualizando galeria...";
   setProgress(92);
   try {
-    const fresh = await fetchServerList();
-    fresh.sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { numeric: true })
-    );
-    state.items = mergeLists(state.items, fresh);
-    writeCache(state.items);
-    resetAndRenderAll();
+    await fetchAllPagesAndRender();
   } catch (e) {
     console.warn("Falha ao atualizar após upload", e);
   }
 
   hideLoading("✅ Envio finalizado!");
-  const summary = `✅ ${sent} enviado(s) | ❌ ${failed} com erro`;
-  showToast(summary, failed ? "warning" : "success");
+  showToast(`✅ ${sent} enviado(s) | ❌ ${failed} com erro`, failed ? "warning" : "success");
 
   btnUpload.disabled = false;
   btnUpload.classList.remove("active");
@@ -497,12 +504,11 @@ btnUpload.addEventListener("click", async () => {
 });
 
 /***********************
- * EXCLUSÃO CONFIRMADA
+ * EXCLUSÃO
  ***********************/
 confirmDelete.addEventListener("click", async () => {
   if (!pendingDelete) return;
   confirmModal.classList.add("hidden");
-
   try {
     showLoading(`🗑️ Excluindo ${pendingDelete.filename}...`);
     const res = await fetch(ENDPOINTS.delete, {
@@ -512,15 +518,12 @@ confirmDelete.addEventListener("click", async () => {
     });
     const result = await res.json();
     if (res.ok) {
-      // Remove do estado e cache
       state.items = state.items.filter((x) => x.name !== pendingDelete.filename);
       writeCache(state.items);
-      // Re-render filtrado
       resetAndRenderAll();
       showToast(result.message);
     } else showToast(result.error || "Erro ao excluir", "error");
-  } catch (err) {
-    console.error(err);
+  } catch {
     showToast("Erro na exclusão", "error");
   } finally {
     pendingDelete = null;

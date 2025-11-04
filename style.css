@@ -135,6 +135,9 @@ html, body {
   overflow-y: auto;     /* 🔹 scroll apenas dentro da lista */
   margin-top: 10px;
   cursor: pointer;
+  height: 80vh;
+  scroll-behavior: smooth;
+
 }
 
 .file-item {
@@ -196,4 +199,113 @@ html, body {
   .upload header p { font-size: 26px; }
   .importar { width: 100%; padding: 12px 0; }
   .logo-top img { width: 130px; }
+}
+
+/* Container */
+.download-wrap {
+  display: flex;
+  justify-content: center;
+  margin: 22px 0 34px;
+}
+
+/* Botão */
+.dl2{
+  --radius: 12px;
+  --bg: #ffffff;
+  --txt: #2f3441;
+  --accent: #fec601;      /* amarelo */
+  --success: #16bf78;     /* verde */
+  --shadow: 0 6px 18px rgba(18,22,33,.18);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 22px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--txt);
+  font: 600 15px/1.1 Inter, Roboto, system-ui, -apple-system, "Segoe UI", Arial;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  user-select: none;
+  transition: transform .2s ease, box-shadow .2s ease, color .25s ease;
+  overflow: hidden;
+  isolation: isolate; /* mantem a barra dentro */
+}
+
+.dl2:focus-visible{ outline: 2px solid #7aa7ff; outline-offset: 2px; }
+.dl2:hover{ transform: translateY(-1px); box-shadow: 0 10px 24px rgba(18,22,33,.22); }
+
+/* Ícones */
+.dl2__icon{
+  width: 22px; height: 22px; display: grid; place-items: center;
+}
+.dl2 .i{ width: 22px; height: 22px; fill: currentColor; }
+.dl2 .i-check{ display: none; }
+
+/* Texto */
+.dl2__text{ white-space: nowrap; }
+
+/* Barra de progresso (fundo) */
+.dl2__bar{
+  position: absolute; left: 10px; right: 10px; bottom: 8px;
+  height: 4px; border-radius: 2px; background: rgba(0,0,0,.06);
+  overflow: hidden; pointer-events: none;
+}
+.dl2__bar > span{
+  display: block; height: 100%; width: 0%;
+  background:  #16bf78;
+  transition: width .15s linear;  /* fluido e estável */
+  will-change: width;
+}
+
+/* Estados */
+.dl2.is-busy{
+  color: #4a5161;
+  cursor: default;
+  transform: none;
+  box-shadow: var(--shadow);
+}
+.dl2.is-done{
+  color: var(--success);
+}
+.dl2.is-done .i-download{ display: none; }
+.dl2.is-done .i-check{ display: block; }
+
+/* Desabilitar clique quando ocupado */
+.dl2.is-busy,
+.dl2.is-done{
+  pointer-events: none;
+}
+
+.file-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #333;
+}
+.progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #eee;
+  overflow: hidden;
+}
+.progress-inner {
+  height: 100%;
+  width: 0%;
+  background: #ffd24d;
+  transition: width 0.3s ease;
 }
