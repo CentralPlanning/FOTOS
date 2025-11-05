@@ -144,36 +144,78 @@ function ensureFiltered() {
     ? state.items.filter((it) => it.name.toLowerCase().includes(q))
     : state.items;
 }
+
 function renderNextBatch() {
+  const PAGE_SIZE = 200;
   const start = state.renderedCount;
-  const end = Math.min(start + BATCH_SIZE, state.filtered.length);
+  const end = Math.min(start + PAGE_SIZE, state.filtered.length);
   if (start >= end) return;
 
+  // Cria o observer apenas uma vez (fora do loop)
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const img = entry.target;
+        img.src = img.dataset.src; // carrega a imagem real
+        observer.unobserve(img);
+      }
+    });
+  });
+
   const fragment = document.createDocumentFragment();
+
   for (let i = start; i < end; i++) {
     const f = state.filtered[i];
     const li = document.createElement("li");
     li.className = "file-item";
-    li.innerHTML = `
-      <div style="display:flex;align-items:center;gap:10px;">
-        <img src="${f.url}" width="40" height="40" style="border-radius:6px;object-fit:cover;">
-        <span class="file-name">${f.name}</span>
-      </div>
-      <button class="delete-btn" title="Excluir"><i class="fa fa-trash"></i></button>
-    `;
-    li.querySelector(".file-name").addEventListener("click", () =>
-      window.open(f.url, "_blank")
-    );
-    li.querySelector(".delete-btn").addEventListener("click", () => {
+
+    // Criar imagem lazy manualmente
+    const img = document.createElement("img");
+    img.dataset.src = f.url; // carrega depois
+    img.width = 40;
+    img.height = 40;
+    img.loading = "lazy";
+    img.style.borderRadius = "6px";
+    img.style.objectFit = "cover";
+    observer.observe(img); // ativa observador
+
+    // Criar conteúdo do item
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "file-name";
+    nameSpan.textContent = f.name;
+    nameSpan.addEventListener("click", () => window.open(f.url, "_blank"));
+
+    const div = document.createElement("div");
+    div.style.display = "flex";
+    div.style.alignItems = "center";
+    div.style.gap = "10px";
+    div.appendChild(img);
+    div.appendChild(nameSpan);
+
+    const btn = document.createElement("button");
+    btn.className = "delete-btn";
+    btn.title = "Excluir";
+    btn.innerHTML = `<i class="fa fa-trash"></i>`;
+    btn.addEventListener("click", () => {
       pendingDelete = { filename: f.name, element: li };
       confirmText.textContent = `Deseja excluir "${f.name}"?`;
       confirmModal.classList.remove("hidden");
     });
+
+    li.appendChild(div);
+    li.appendChild(btn);
     fragment.appendChild(li);
+
+    // deixa o navegador respirar a cada 50 itens
+    if (i % 50 === 0) requestAnimationFrame(() => {});
   }
+
   fileList.appendChild(fragment);
   state.renderedCount = end;
 }
+
+
+
 function resetAndRenderAll() {
   clearList();
   ensureFiltered();

@@ -28,51 +28,39 @@ s3 = boto3.client(
     region_name="auto"
 )
 
-# === ROTA PRINCIPAL: SERVE FRONTEND ===
+# === SERVE FRONTEND (index.html) ===
 @app.route("/")
 def serve_index():
-    """Serve o index.html do frontend (na raiz do projeto)."""
     return send_from_directory(".", "index.html")
 
-
-# === LISTAR ARQUIVOS PAGINADO (SUPORTA 62K+) ===
+# === LISTAR ARQUIVOS PAGINADO ===
 @app.route("/list_files", methods=["GET"])
 def list_files():
     try:
-        token = request.args.get("token")  # token opcional
-        max_keys = int(request.args.get("max", 1000))  # máximo por página (limite da API)
-
-        kwargs = {
-            "Bucket": BUCKET,
-            "Prefix": FOLDER,
-            "MaxKeys": max_keys
-        }
+        token = request.args.get("token")
+        max_keys = int(request.args.get("max", 1000))
+        kwargs = {"Bucket": BUCKET, "Prefix": FOLDER, "MaxKeys": max_keys}
         if token:
             kwargs["ContinuationToken"] = token
 
         response = s3.list_objects_v2(**kwargs)
-
         items = []
         for obj in response.get("Contents", []):
             key = obj["Key"]
-            if key.endswith("/"):
-                continue
-            items.append({
-                "name": key.split("/")[-1],
-                "url": f"{PUBLIC_URL}/{key}"
-            })
-
-        next_token = response.get("NextContinuationToken")
+            if not key.endswith("/"):
+                items.append({
+                    "name": key.split("/")[-1],
+                    "url": f"{PUBLIC_URL}/{key}"
+                })
 
         return jsonify({
             "items": items,
-            "next_token": next_token,
-            "has_more": bool(next_token)
+            "next_token": response.get("NextContinuationToken"),
+            "has_more": bool(response.get("NextContinuationToken"))
         })
     except Exception as e:
-        print("❌ Erro ao listar arquivos:", e)
+        print("❌ Erro ao listar:", e)
         return jsonify({"error": str(e)}), 500
-
 
 # === UPLOAD DE ARQUIVOS ===
 @app.route("/upload", methods=["POST"])
@@ -80,40 +68,37 @@ def upload_file():
     try:
         if "file" not in request.files:
             return jsonify({"error": "Nenhum arquivo enviado"}), 400
-
         file = request.files["file"]
         filename = secure_filename(file.filename)
         destino = f"{FOLDER}{filename}"
 
-        s3.upload_fileobj(file, BUCKET, destino, ExtraArgs={"ContentType": file.content_type})
+        s3.upload_fileobj(
+            file, BUCKET, destino,
+            ExtraArgs={"ContentType": file.content_type}
+        )
         url = f"{PUBLIC_URL}/{destino}"
         print(f"✅ Upload concluído: {url}")
-
         return jsonify({"message": "Upload concluído!", "url": url})
     except Exception as e:
         print("❌ Erro no upload:", e)
         return jsonify({"error": str(e)}), 500
 
-
-# === EXCLUIR ARQUIVO ===
+# === EXCLUSÃO DE ARQUIVO ===
 @app.route("/delete", methods=["POST"])
 def delete_file():
     try:
         data = request.get_json()
         filename = data.get("filename")
-
         if not filename:
             return jsonify({"error": "Nome do arquivo ausente"}), 400
 
         key = f"{FOLDER}{filename}"
         s3.delete_object(Bucket=BUCKET, Key=key)
         print(f"🗑️ Arquivo excluído: {key}")
-
         return jsonify({"message": f"{filename} removido com sucesso!"})
     except Exception as e:
         print("❌ Erro ao excluir:", e)
         return jsonify({"error": str(e)}), 500
-
 
 # === INICIAR SERVIDOR ===
 if __name__ == "__main__":
