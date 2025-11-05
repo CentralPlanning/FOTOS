@@ -8,12 +8,9 @@ const ENDPOINTS = {
   delete: `${API_BASE}/delete`,
 };
 
-// Renderização em lotes (UI)
-const BATCH_SIZE = 500;
-// Upload paralelo
+const BATCH_SIZE = 1000;
 const UPLOAD_CONCURRENCY = 5;
-// Cache local
-const CACHE_KEY = "galleryIndex.v5";
+const CACHE_KEY = "galleryIndex.v6";
 const CACHE_TTL = 24 * 60 * 60 * 1000;
 
 /***********************
@@ -26,11 +23,9 @@ const btnUpload = document.querySelector(".importar");
 const listFiles = document.querySelector(".list-files");
 const fileList = document.getElementById("fileList");
 const searchInput = document.getElementById("searchInput");
-
 const loadingModal = document.getElementById("loadingModal");
 const loadingText = document.getElementById("loadingText");
 const progressInner = document.getElementById("progressInner");
-
 const confirmModal = document.getElementById("confirmModal");
 const confirmText = document.getElementById("confirmText");
 const cancelDelete = document.getElementById("cancelDelete");
@@ -52,7 +47,7 @@ const state = {
 };
 
 /***********************
- * TOASTS
+ * TOAST
  ***********************/
 function showToast(msg, type = "success") {
   let container = document.querySelector(".toast-container");
@@ -69,51 +64,35 @@ function showToast(msg, type = "success") {
   container.appendChild(toast);
   setTimeout(() => {
     toast.style.opacity = "0";
-    toast.style.transform = "translateX(50%)";
-    setTimeout(() => toast.remove(), 500);
+    setTimeout(() => toast.remove(), 400);
   }, 3500);
 }
 
 /***********************
- * MODAL (SOMENTE UPLOAD/EXCLUSÃO)
+ * MODAL
  ***********************/
 function showLoading(msg = "⏳ Processando...") {
-  if (!loadingModal) return;
-  loadingModal.classList.remove("hidden");
+  loadingModal?.classList.remove("hidden");
   loadingText.textContent = msg;
   progressInner.style.width = "0%";
 }
 function setProgress(pct) {
-  if (!progressInner) return;
   progressInner.style.width = `${Math.max(0, Math.min(100, pct))}%`;
 }
 function hideLoading(msg = "✅ Concluído!") {
-  if (!loadingModal) return;
   loadingText.textContent = msg;
   setProgress(100);
-  setTimeout(() => loadingModal.classList.add("hidden"), 900);
+  setTimeout(() => loadingModal.classList.add("hidden"), 800);
 }
 
 /***********************
- * DEBOUNCE (busca)
- ***********************/
-function debounce(fn, ms) {
-  let t;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  };
-}
-
-/***********************
- * CACHE LOCAL
+ * CACHE
  ***********************/
 function readCache() {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const obj = JSON.parse(raw);
-    if (!obj || !obj.items || !obj.storedAt) return null;
     if (Date.now() - obj.storedAt > CACHE_TTL) return null;
     return obj.items;
   } catch {
@@ -122,6 +101,7 @@ function readCache() {
 }
 function writeCache(items) {
   try {
+    if (items.length > 1000) return; // evita travar localStorage
     localStorage.setItem(
       CACHE_KEY,
       JSON.stringify({ storedAt: Date.now(), items })
@@ -132,8 +112,82 @@ function writeCache(items) {
 }
 
 /***********************
- * RENDERIZAÇÃO (VIRTUAL + BATCH)
+ * RENDERIZAÇÃO
  ***********************/
+const lazyObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const img = entry.target;
+      img.src = img.dataset.src;
+      lazyObserver.unobserve(img);
+    }
+  });
+});
+
+async function renderNextBatch() {
+  const PAGE_SIZE = 1000;
+  const start = state.renderedCount;
+  const end = Math.min(start + PAGE_SIZE, state.filtered.length);
+  if (start >= end) return;
+
+  const fragment = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+  const f = state.filtered[i];
+
+  const li = document.createElement("li");
+  li.className = "file-item";
+  li.dataset.name = f.name;          // <- guardar o nome no dataset para o delegado
+
+  const img = document.createElement("img");
+  img.dataset.src = f.url;
+  img.width = 40;
+  img.height = 40;
+  img.loading = "lazy";
+  img.style.borderRadius = "6px";
+  img.style.objectFit = "cover";
+  lazyObserver.observe(img);
+
+  const nameSpan = document.createElement("span");
+  nameSpan.className = "file-name";
+  nameSpan.textContent = f.name;
+  nameSpan.addEventListener("click", () => window.open(f.url, "_blank"));
+
+  const div = document.createElement("div");
+  div.style.display = "flex";
+  div.style.alignItems = "center";
+  div.style.gap = "10px";
+  div.appendChild(img);
+  div.appendChild(nameSpan);
+
+  // botão de deletar (sem listener aqui – usaremos delegação global)
+  const btn = document.createElement("button");
+  btn.className = "delete-btn";
+  btn.title = "Excluir";
+  btn.innerHTML = `<i class="fa fa-trash"></i>`;
+
+  // guarda o nome do arquivo no <li> para recuperar depois
+  li.dataset.filename = f.name;
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const filename = li.dataset.filename;
+    pendingDelete = { filename, element: li };
+    confirmText.textContent = `Deseja excluir "${filename}"?`;
+    confirmModal.classList.remove("hidden");
+  });
+
+  li.appendChild(div);
+  li.appendChild(btn);
+  fragment.appendChild(li);
+
+  if (i % 200 === 0) await new Promise(r => requestAnimationFrame(r));
+}
+
+
+  fileList.appendChild(fragment);
+  state.renderedCount = end;
+}
+
 function clearList() {
   fileList.innerHTML = "";
   state.renderedCount = 0;
@@ -144,164 +198,117 @@ function ensureFiltered() {
     ? state.items.filter((it) => it.name.toLowerCase().includes(q))
     : state.items;
 }
-
-function renderNextBatch() {
-  const PAGE_SIZE = 200;
-  const start = state.renderedCount;
-  const end = Math.min(start + PAGE_SIZE, state.filtered.length);
-  if (start >= end) return;
-
-  // Cria o observer apenas uma vez (fora do loop)
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        const img = entry.target;
-        img.src = img.dataset.src; // carrega a imagem real
-        observer.unobserve(img);
-      }
-    });
-  });
-
-  const fragment = document.createDocumentFragment();
-
-  for (let i = start; i < end; i++) {
-    const f = state.filtered[i];
-    const li = document.createElement("li");
-    li.className = "file-item";
-
-    // Criar imagem lazy manualmente
-    const img = document.createElement("img");
-    img.dataset.src = f.url; // carrega depois
-    img.width = 40;
-    img.height = 40;
-    img.loading = "lazy";
-    img.style.borderRadius = "6px";
-    img.style.objectFit = "cover";
-    observer.observe(img); // ativa observador
-
-    // Criar conteúdo do item
-    const nameSpan = document.createElement("span");
-    nameSpan.className = "file-name";
-    nameSpan.textContent = f.name;
-    nameSpan.addEventListener("click", () => window.open(f.url, "_blank"));
-
-    const div = document.createElement("div");
-    div.style.display = "flex";
-    div.style.alignItems = "center";
-    div.style.gap = "10px";
-    div.appendChild(img);
-    div.appendChild(nameSpan);
-
-    const btn = document.createElement("button");
-    btn.className = "delete-btn";
-    btn.title = "Excluir";
-    btn.innerHTML = `<i class="fa fa-trash"></i>`;
-    btn.addEventListener("click", () => {
-      pendingDelete = { filename: f.name, element: li };
-      confirmText.textContent = `Deseja excluir "${f.name}"?`;
-      confirmModal.classList.remove("hidden");
-    });
-
-    li.appendChild(div);
-    li.appendChild(btn);
-    fragment.appendChild(li);
-
-    // deixa o navegador respirar a cada 50 itens
-    if (i % 50 === 0) requestAnimationFrame(() => {});
-  }
-
-  fileList.appendChild(fragment);
-  state.renderedCount = end;
-}
-
-
-
 function resetAndRenderAll() {
   clearList();
   ensureFiltered();
   renderNextBatch();
 }
+window.state = state;
 
-/***********************
- * INFINITE SCROLL
- ***********************/
-fileList.addEventListener("scroll", () => {
-  if (fileList.scrollTop + fileList.clientHeight >= fileList.scrollHeight - 120) {
-    renderNextBatch();
+function openConfirm(name, liEl) {
+  pendingDelete = { filename: name, element: liEl };
+  if (confirmText) confirmText.textContent = `Deseja excluir "${name}"?`;
+  if (confirmModal) confirmModal.classList.remove("hidden");
+}
+function closeConfirm() {
+  if (confirmModal) confirmModal.classList.add("hidden");
+  pendingDelete = null;
+}
+
+// Esc fecha o modal
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !confirmModal.classList.contains("hidden")) {
+    closeConfirm();
   }
 });
 
-/***********************
- * BUSCA (com debounce)
- ***********************/
-searchInput.addEventListener(
-  "input",
-  debounce(() => {
-    state.searchTerm = searchInput.value || "";
-    resetAndRenderAll();
-  }, 300)
-);
+fileList.addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".delete-btn");
+  if (!btn) return;
+  const li = btn.closest("li.file-item");
+  if (!li) return;
+  const filename = li.dataset.name || "";
+  pendingDelete = { filename, element: li };
+  if (confirmText) confirmText.textContent = `Deseja excluir "${filename}"?`;
+  if (confirmModal) confirmModal.classList.remove("hidden");
+});
 
 /***********************
- * PAINEL INFERIOR (carregamento de galeria)
+ * BUSCA
+ ***********************/
+function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+searchInput.addEventListener("input", debounce(() => {
+  state.searchTerm = searchInput.value || "";
+  resetAndRenderAll();
+}, 300));
+
+/***********************
+ * PAINEL DE PROGRESSO
  ***********************/
 const progressGlobal = document.createElement("div");
 progressGlobal.style = `
   position: fixed; bottom: 14px; right: 14px; z-index: 99999;
   background: rgba(0,0,0,.65); color: #fff; padding: 8px 12px;
-  border-radius: 8px; font: 13px/1.2 Inter,system-ui,Segoe UI,Arial;
+  border-radius: 8px; font: 13px/1.2 Inter,system-ui;
   display: none; cursor: pointer; backdrop-filter: blur(4px);
 `;
 document.body.appendChild(progressGlobal);
-
 progressGlobal.addEventListener("click", () => {
   state.paused = !state.paused;
   progressGlobal.textContent = state.paused
-    ? `⏸️ Pausado (${state.totalLoaded.toLocaleString("pt-BR")} / ${state.totalExpected.toLocaleString("pt-BR")}) — Clique para retomar`
+    ? `⏸️ Pausado (${state.totalLoaded.toLocaleString("pt-BR")} / ${state.totalExpected.toLocaleString("pt-BR")})`
     : `▶️ Retomando...`;
 });
 
 /***********************
- * LISTAGEM PAGINADA (sem modal)
+ * LISTAR PAGINADO
  ***********************/
 async function fetchAllPagesAndRender() {
   let allItems = [];
   let token = null;
   let page = 1;
-
   state.paused = false;
   state.totalLoaded = 0;
-  state.totalExpected = 0;
   progressGlobal.style.display = "block";
-  progressGlobal.textContent = "📸 Iniciando carregamento... — Clique para pausar";
+  progressGlobal.textContent = "📸 Iniciando carregamento...";
 
+  // --- Antes do loop começar ---
+  const spinner = document.querySelector(".spinner");
+  if (spinner) {
+    spinner.classList.remove("done");
+    spinner.classList.add("loading");
+  }
   while (true) {
-    if (state.paused) {
-      progressGlobal.textContent = `⏸️ Pausado (${state.totalLoaded.toLocaleString("pt-BR")} / ${state.totalExpected.toLocaleString("pt-BR")}) — Clique para retomar`;
-      await new Promise((r) => {
-        const iv = setInterval(() => {
-          if (!state.paused) { clearInterval(iv); r(); }
-        }, 300);
-      });
-    }
-
-    const url = token ? `${ENDPOINTS.list}?token=${encodeURIComponent(token)}&max=1000` : `${ENDPOINTS.list}?max=1000`;
+    if (state.paused) await new Promise(r => {
+      const iv = setInterval(() => {
+        if (!state.paused) { clearInterval(iv); r(); }
+      }, 300);
+    });
+    
+    const url = token
+      ? `${ENDPOINTS.list}?token=${encodeURIComponent(token)}&max=5000`
+      : `${ENDPOINTS.list}?max=5000`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Falha ao buscar página ${page}`);
     const data = await res.json();
 
     const items = Array.isArray(data) ? data : (data.items || []);
     allItems.push(...items);
-
     state.totalLoaded = allItems.length;
-    state.totalExpected = data.has_more ? page * 1000 : allItems.length;
+    state.totalExpected = data.has_more ? page * 5000 : allItems.length;
+    if (page % 2 === 0 || !data.has_more)
+      progressGlobal.textContent =
+        `📸 ${state.totalLoaded.toLocaleString("pt-BR")}`;
 
-    progressGlobal.textContent =
-      `📸 ${state.totalLoaded.toLocaleString("pt-BR")} / ${state.totalExpected.toLocaleString("pt-BR")} — Clique para pausar`;
-
-    // Atualiza UI incrementalmente
     state.items = allItems.slice();
     resetAndRenderAll();
+    window.state = state; // 
 
     if (!data.has_more || !data.next_token) break;
     token = data.next_token;
@@ -309,9 +316,8 @@ async function fetchAllPagesAndRender() {
   }
 
   progressGlobal.textContent = `✅ ${allItems.length.toLocaleString("pt-BR")} imagens carregadas`;
-  setTimeout(() => (progressGlobal.style.display = "none"), 5000);
+  setTimeout(() => (progressGlobal.style.display = "none"), 4000);
 
-  // Ordena e persiste no cache
   allItems.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   writeCache(allItems);
 }
@@ -320,16 +326,12 @@ async function fetchAllPagesAndRender() {
  * CARREGAMENTO INICIAL
  ***********************/
 async function loadGallery() {
-  // 1) tenta cache
   const cached = readCache();
   if (cached?.length) {
     state.items = cached;
     resetAndRenderAll();
-  } else {
-    fileList.innerHTML = "<li style='padding:10px;color:#888'>Carregando...</li>";
-  }
+  } else fileList.innerHTML = "<li style='padding:10px;color:#888'>Carregando...</li>";
 
-  // 2) busca paginado sem modal
   try {
     state.loading = true;
     await fetchAllPagesAndRender();
@@ -340,124 +342,61 @@ async function loadGallery() {
     state.loading = false;
   }
 }
-window.state = state;
 
 /***********************
- * PREVIEW + VALIDAÇÃO (apenas nomes numéricos)
- ***********************/
-inputFile.addEventListener("change", () => {
-  listFiles.innerHTML = "";
-  if (!inputFile.files.length) return;
-
-  const validFiles = [];
-  const invalidFiles = [];
-
-  Array.from(inputFile.files).forEach((file) => {
-    const base = file.name.split(".")[0];
-    const isValid = /^\d+$/.test(base);
-
-   // Define ícones por extensão
-  const ext = file.name.split('.').pop().toLowerCase();
-  const iconMap = {
-    jpg:  "https://cdn-icons-png.flaticon.com/512/337/337940.png",
-    jpeg: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
-    png:  "https://cdn-icons-png.flaticon.com/512/337/337940.png",
-    webp: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
-    gif:  "https://cdn-icons-png.flaticon.com/512/337/337940.png",
-    default: "https://cdn-icons-png.flaticon.com/512/833/833524.png"
-  };
-  const iconUrl = iconMap[ext] || iconMap.default;
-
-  // Cria o item visual
-  const row = document.createElement("div");
-  row.className = "file";
-  row.innerHTML = `
-    <img src="${iconUrl}" 
-        style="width:32px;height:32px;opacity:.9;border-radius:6px;" />
-    <span class="file-name">${file.name}</span>
-    <div class="progress"></div>
-  `;
-  listFiles.appendChild(row);
-
-    if (!isValid) {
-      invalidFiles.push(file.name);
-      row.classList.add("invalid-file");
-      setTimeout(() => {
-        row.style.transition = "opacity .5s ease";
-        row.style.opacity = "0";
-        setTimeout(() => row.remove(), 400);
-      }, 800);
-    } else {
-      validFiles.push(file);
-    }
-  });
-
-  if (invalidFiles.length) {
-    showToast(`⚠️ ${invalidFiles.length} ignorado(s): ${invalidFiles.join(", ")}`, "warning");
-  }
-
-  if (!validFiles.length) {
-    btnUpload.classList.remove("active");
-    showToast("Nenhum arquivo válido para upload.", "error");
-    return;
-  }
-
-  btnUpload.classList.add("active");
-
-  // substitui o input pelos válidos
-  const dt = new DataTransfer();
-  validFiles.forEach((f) => dt.items.add(f));
-  inputFile.files = dt.files;
-});
-
-/***********************
- * CONVERSÃO P/ WEBP (300px lado maior)
+ * CONVERSÃO SEGURO WEBP
  ***********************/
 async function processImage(file) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = (event) => {
+    let finished = false;
+    const finalize = (r = null) => { if (!finished) { finished = true; resolve(r); } };
+
+    const globalTimeout = setTimeout(() => {
+      console.warn("⏱️ Timeout global:", file.name);
+      finalize(null);
+    }, 4000);
+
+    reader.onload = (e) => {
       const img = new Image();
+      const imgTimeout = setTimeout(() => {
+        console.warn("⚠️ Timeout decode:", file.name);
+        finalize(null);
+      }, 3000);
+
       img.onload = () => {
-        const maxSide = 300;
-        let { width, height } = img;
-        if (width >= height) {
-          height = Math.round((height / width) * maxSide);
-          width = maxSide;
-        } else {
-          width = Math.round((width / height) * maxSide);
-          height = maxSide;
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, width, height);
-        canvas.toBlob(
-          (blob) => {
-            if (!blob) return reject("Erro na conversão");
-            const baseName = file.name.split(".")[0];
-            const webp = new File([blob], `${baseName}.webp`, { type: "image/webp" });
-            resolve(webp);
-          },
-          "image/webp",
-          0.85
-        );
+        clearTimeout(imgTimeout); clearTimeout(globalTimeout);
+        try {
+          const maxSide = 300;
+          let { width, height } = img;
+          if (width >= height) { height = Math.round((height / width) * maxSide); width = maxSide; }
+          else { width = Math.round((width / height) * maxSide); height = maxSide; }
+          const canvas = document.createElement("canvas");
+          canvas.width = width; canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob((blob) => {
+            if (!blob) return finalize(null);
+            const base = file.name.split(".")[0];
+            finalize(new File([blob], `${base}.webp`, { type: "image/webp" }));
+          }, "image/webp", 0.85);
+        } catch { finalize(null); }
       };
-      img.src = event.target.result;
+      img.onerror = () => { finalize(null); };
+      img.src = e.target.result;
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    reader.onerror = () => finalize(null);
+    try { reader.readAsDataURL(file); } catch { finalize(null); }
   });
 }
 
 /***********************
- * UPLOAD (paralelo + barra global do modal)
+ * UPLOAD
  ***********************/
 async function uploadOne(webpFile) {
-  const formData = new FormData();
-  formData.append("file", webpFile);
-  const res = await fetch(ENDPOINTS.upload, { method: "POST", body: formData });
+  const form = new FormData();
+  form.append("file", webpFile);
+  const res = await fetch(ENDPOINTS.upload, { method: "POST", body: form });
   const result = await res.json();
   if (!res.ok) throw new Error(result?.error || "Falha no upload");
   return result;
@@ -472,73 +411,136 @@ async function runInBatches(items, worker, concurrency, onProgress) {
         const i = idx++;
         inFlight++;
         worker(items[i])
-          .then((r) => (results[i] = { ok: true, value: r }))
-          .catch((e) => (results[i] = { ok: false, error: e }))
+          .then((r) => results[i] = { ok: true, value: r })
+          .catch((e) => results[i] = { ok: false, error: e })
           .finally(() => {
-            inFlight--; done++;
-            onProgress?.(done, items.length);
-            next();
+            inFlight--; done++; onProgress?.(done, items.length); next();
           });
       }
     }
     next();
   });
 }
+/***********************
+ * LISTA DE ARQUIVOS (preview antes do upload)
+ ***********************/
+inputFile.addEventListener("change", () => {
+  listFiles.innerHTML = "";
+  if (!inputFile.files.length) return;
 
+  const validFiles = [];
+  const invalidFiles = [];
+
+  Array.from(inputFile.files).forEach((file) => {
+    const base = file.name.split(".")[0];
+    const isValid = /^\d+$/.test(base);
+
+    // Ícones por extensão
+    const ext = file.name.split(".").pop().toLowerCase();
+    const iconMap = {
+      jpg: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+      jpeg: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+      png: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+      webp: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+      gif: "https://cdn-icons-png.flaticon.com/512/337/337940.png",
+      default: "https://cdn-icons-png.flaticon.com/512/833/833524.png",
+    };
+    const iconUrl = iconMap[ext] || iconMap.default;
+
+    // Linha da lista
+    const row = document.createElement("div");
+    row.className = "file";
+    row.style.cssText = `
+      display:flex;align-items:center;gap:10px;
+      padding:6px 10px;margin:2px 0;
+      background:#fafafa;border-radius:6px;
+    `;
+    row.innerHTML = `
+      <img src="${iconUrl}" style="width:32px;height:32px;opacity:.9;border-radius:6px;" />
+      <span class="file-name" style="flex:1;">${file.name}</span>
+      <div class="progress" style="flex:0 0 80px;height:4px;background:#eee;border-radius:4px;overflow:hidden;">
+        <div class="bar" style="width:0;height:100%;background:#f5c400;"></div>
+      </div>
+    `;
+    listFiles.appendChild(row);
+
+    if (!isValid) {
+      invalidFiles.push(file.name);
+      row.style.opacity = "0.5";
+      row.style.filter = "grayscale(1)";
+      row.querySelector(".file-name").style.color = "#c33";
+      setTimeout(() => row.remove(), 1000);
+    } else {
+      validFiles.push(file);
+    }
+  });
+
+  if (invalidFiles.length) {
+    showToast(
+      `⚠️ ${invalidFiles.length} ignorado(s): ${invalidFiles.join(", ")}`,
+      "warning"
+    );
+  }
+
+  if (!validFiles.length) {
+    btnUpload.classList.remove("active");
+    showToast("Nenhum arquivo válido para upload.", "error");
+    return;
+  }
+
+  // Ativa botão
+  btnUpload.classList.add("active");
+  btnUpload.style.display = "inline-block";
+  btnUpload.disabled = false;
+
+  // Substitui input apenas com válidos
+  const dt = new DataTransfer();
+  validFiles.forEach((f) => dt.items.add(f));
+  inputFile.files = dt.files;
+});
+
+/***********************
+ * BOTÃO UPLOAD
+ ***********************/
 btnUpload.addEventListener("click", async () => {
   if (!inputFile.files.length) return showToast("Nenhum arquivo selecionado", "warning");
 
   const allFiles = Array.from(inputFile.files);
   const validFiles = allFiles.filter((f) => /^\d+$/.test(f.name.split(".")[0]));
-  if (!validFiles.length) {
-    showToast("Nenhum arquivo válido para enviar.", "error");
-    return;
-  }
+  if (!validFiles.length) return showToast("Nenhum arquivo válido.", "error");
 
   showLoading(`⬆️ Preparando ${validFiles.length} arquivo(s)...`);
   setProgress(5);
   btnUpload.disabled = true;
 
-  // 1) Converter
   const webps = [];
   for (let i = 0; i < validFiles.length; i++) {
+    if (i % 20 === 0) await new Promise(r => requestAnimationFrame(r));
     loadingText.textContent = `🧪 Convertendo ${i + 1} / ${validFiles.length}`;
     const w = await processImage(validFiles[i]);
-    webps.push(w);
+    if (w) webps.push(w);
+    else showToast(`⚠️ ${validFiles[i].name} corrompida — ignorada`, "warning");
     setProgress(5 + (i / validFiles.length) * 20);
   }
 
-  // 2) Upload paralelo
   let lastPct = 25;
-  const results = await runInBatches(
-    webps,
-    uploadOne,
-    UPLOAD_CONCURRENCY,
-    (done, total) => {
-      const pct = 25 + Math.floor((done / total) * 60);
-      if (pct > lastPct) {
-        lastPct = pct;
-        setProgress(pct);
-        loadingText.textContent = `📤 Enviando ${done} / ${total}...`;
-      }
+  const results = await runInBatches(webps, uploadOne, UPLOAD_CONCURRENCY, (done, total) => {
+    const pct = 25 + Math.floor((done / total) * 60);
+    if (pct > lastPct) {
+      lastPct = pct;
+      setProgress(pct);
+      loadingText.textContent = `📤 Enviando ${done} / ${total}...`;
     }
-  );
+  });
 
-  // 3) Atualizar galeria (paginação real, sem modal)
-  const sent = results.filter((r) => r?.ok).length;
-  const failed = results.filter((r) => !r?.ok).length;
+  const sent = results.filter((r) => r.ok).length;
+  const failed = results.filter((r) => !r.ok).length;
 
   loadingText.textContent = "🔄 Atualizando galeria...";
   setProgress(92);
-  try {
-    await fetchAllPagesAndRender();
-  } catch (e) {
-    console.warn("Falha ao atualizar após upload", e);
-  }
-
+  await fetchAllPagesAndRender();
   hideLoading("✅ Envio finalizado!");
-  showToast(`✅ ${sent} enviado(s) | ❌ ${failed} com erro`, failed ? "warning" : "success");
-
+  showToast(`✅ ${sent} enviado(s) | ❌ ${failed} erro(s)`, failed ? "warning" : "success");
   btnUpload.disabled = false;
   btnUpload.classList.remove("active");
   listFiles.innerHTML = "";
@@ -548,43 +550,79 @@ btnUpload.addEventListener("click", async () => {
 /***********************
  * EXCLUSÃO
  ***********************/
+let deletingNow = false;
+
 confirmDelete.addEventListener("click", async () => {
-  if (!pendingDelete) return;
-  confirmModal.classList.add("hidden");
+  if (!pendingDelete || deletingNow) return;
+  deletingNow = true;
+
+  // feedback visual rápido (sem bloquear com spinner grande)
+  confirmDelete.disabled = true;
+  cancelDelete.disabled = true;
+
   try {
-    showLoading(`🗑️ Excluindo ${pendingDelete.filename}...`);
+    const filename = pendingDelete.filename;
+
+    // chama API
     const res = await fetch(ENDPOINTS.delete, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: pendingDelete.filename }),
+      body: JSON.stringify({ filename })
     });
-    const result = await res.json();
-    if (res.ok) {
-      state.items = state.items.filter((x) => x.name !== pendingDelete.filename);
-      writeCache(state.items);
-      resetAndRenderAll();
-      showToast(result.message);
-    } else showToast(result.error || "Erro ao excluir", "error");
-  } catch {
+
+    let result = {};
+    try { result = await res.json(); } catch { /* sem corpo json */ }
+
+    if (!res.ok) {
+      showToast(result?.error || "Erro ao excluir", "error");
+      return;
+    }
+
+    // === Atualiza STATE (remove do items e filtered)
+    state.items = state.items.filter(it => it.name !== filename);
+    state.filtered = state.filtered.filter(it => it.name !== filename);
+
+    // === Remove do DOM imediatamente
+    if (pendingDelete.element && pendingDelete.element.parentNode) {
+      pendingDelete.element.remove();
+    }
+
+    // regrava cache (limitado no teu writeCache)
+    writeCache(state.items);
+
+    // se quiser re-renderizar o resto (mantém busca/scroll atuais)
+    // resetAndRenderAll(); // opcional — normalmente não precisa
+
+    showToast(result?.message || `🗑️ "${filename}" removido`);
+  } catch (err) {
+    console.error("Delete error:", err);
     showToast("Erro na exclusão", "error");
   } finally {
     pendingDelete = null;
-    hideLoading();
+    confirmModal.classList.add("hidden");
+    confirmDelete.disabled = false;
+    cancelDelete.disabled = false;
+    deletingNow = false;
   }
 });
+
 cancelDelete.addEventListener("click", () => {
   confirmModal.classList.add("hidden");
   pendingDelete = null;
 });
 
+
+cancelDelete.addEventListener("click", () => {
+  closeConfirm();
+});
+
+cancelDelete.addEventListener("click", () => confirmModal.classList.add("hidden"));
+
 /***********************
  * DRAG & DROP
  ***********************/
 triggerFile?.addEventListener("click", (e) => (e.preventDefault(), inputFile.click()));
-dropArea.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dropArea.classList.add("active");
-});
+dropArea.addEventListener("dragover", (e) => { e.preventDefault(); dropArea.classList.add("active"); });
 dropArea.addEventListener("dragleave", () => dropArea.classList.remove("active"));
 dropArea.addEventListener("drop", (e) => {
   e.preventDefault();
@@ -594,6 +632,6 @@ dropArea.addEventListener("drop", (e) => {
 });
 
 /***********************
- * INICIALIZAÇÃO
+ * START
  ***********************/
 window.addEventListener("DOMContentLoaded", loadGallery);
